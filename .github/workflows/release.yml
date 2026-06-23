@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ github.ref_name }}
+    steps:
+    - uses: actions/checkout@v4
+
+    # Build against the matching doltlite engine tag.
+    - name: Checkout doltlite engine
+      uses: actions/checkout@v4
+      with:
+        repository: dolthub/doltlite
+        ref: ${{ github.ref_name }}
+        path: doltlite
+
+    - uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: "17"
+
+    - uses: gradle/actions/setup-gradle@v4
+
+    - name: Build doltlite amalgamation
+      working-directory: doltlite
+      run: |
+        ./configure
+        make sqlite3.c sqlite3.h sqlite3ext.h
+
+    - name: Cross-compile libdoltlite for Android ABIs
+      run: |
+        bash scripts/build-libs.sh "$PWD/doltlite" "${VERSION#v}" \
+          "${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
+
+    - name: Assemble AAR
+      run: gradle assembleRelease -PdoltliteVersion="${VERSION#v}" --no-daemon
+
+    - name: Create release with the AAR
+      if: github.event_name != 'workflow_dispatch'
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        version="${VERSION#v}"
+        aar="$(find build/outputs/aar -name '*-release.aar' | head -1)"
+        cp "$aar" "doltlite-android-${version}.aar"
+        if gh release view "${VERSION}" >/dev/null 2>&1; then
+          gh release upload "${VERSION}" "doltlite-android-${version}.aar" --clobber
+        else
+          gh release create "${VERSION}" "doltlite-android-${version}.aar" \
+            --title "doltlite-android ${version}" --generate-notes
+        fi
+
+    - name: Publish to Maven Central
+      env:
+        SONATYPE_USERNAME: ${{ secrets.SONATYPE_USERNAME }}
+        SONATYPE_PASSWORD: ${{ secrets.SONATYPE_PASSWORD }}
+        SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+        SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
+      run: |
+        # The secrets context can't be used in an `if:`, so gate here. Without
+        # the Sonatype/signing secrets the AAR is still on the GitHub release.
+        if [ -z "$SONATYPE_USERNAME" ] || [ -z "$SIGNING_KEY" ]; then
+          echo "Maven Central secrets not set; skipping publish (AAR is on the release)."
+          exit 0
+        fi
+        gradle publishReleasePublicationToSonatypeRepository \
+          -PdoltliteVersion="${VERSION#v}" --no-daemon
