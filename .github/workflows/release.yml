@@ -62,16 +62,19 @@ jobs:
 
     - name: Publish to Maven Central
       env:
-        SONATYPE_USERNAME: ${{ secrets.SONATYPE_USERNAME }}
-        SONATYPE_PASSWORD: ${{ secrets.SONATYPE_PASSWORD }}
-        SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
-        SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
+        # The vanniktech plugin reads credentials + the in-memory signing key
+        # from these ORG_GRADLE_PROJECT_* env vars.
+        ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.SONATYPE_USERNAME }}
+        ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.SONATYPE_PASSWORD }}
+        ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
+        ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_PASSWORD }}
       run: |
         # The secrets context can't be used in an `if:`, so gate here. Without
-        # the Sonatype/signing secrets the AAR is still on the GitHub release.
-        if [ -z "$SONATYPE_USERNAME" ] || [ -z "$SIGNING_KEY" ]; then
+        # the Central Portal / signing secrets the AAR is still on the GitHub
+        # release. publishAndReleaseToMavenCentral uploads and auto-releases.
+        if [ -z "$ORG_GRADLE_PROJECT_mavenCentralUsername" ] || [ -z "$ORG_GRADLE_PROJECT_signingInMemoryKey" ]; then
           echo "Maven Central secrets not set; skipping publish (AAR is on the release)."
           exit 0
         fi
-        gradle publishReleasePublicationToSonatypeRepository \
-          -PdoltliteVersion="${VERSION#v}" --no-daemon
+        gradle publishAndReleaseToMavenCentral \
+          -PdoltliteVersion="${VERSION#v}" --no-daemon --no-configuration-cache

@@ -1,8 +1,10 @@
+import com.vanniktech.maven.publish.AndroidSingleVariantLibrary
+import com.vanniktech.maven.publish.SonatypeHost
+
 plugins {
     id("com.android.library") version "8.5.2"
     id("org.jetbrains.kotlin.android") version "2.0.20"
-    id("maven-publish")
-    id("signing")
+    id("com.vanniktech.maven.publish") version "0.30.0"
 }
 
 // Version comes from the release workflow: -PdoltliteVersion=x.y.z (from the tag).
@@ -25,12 +27,6 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
-
-    publishing {
-        singleVariant("release") {
-            withSourcesJar()
-        }
-    }
 }
 
 dependencies {
@@ -39,57 +35,33 @@ dependencies {
     api("net.java.dev.jna:jna:5.14.0@aar")
 }
 
-publishing {
-    publications {
-        create<MavenPublication>("release") {
-            groupId = "com.dolthub"
-            artifactId = "doltlite-android"
-            version = doltliteVersion
+mavenPublishing {
+    // Publish the release variant + sources to the Central Portal, signed.
+    configure(AndroidSingleVariantLibrary("release", sourcesJar = true, publishJavadocJar = false))
+    publishToMavenCentral(SonatypeHost.CENTRAL_PORTAL)
+    signAllPublications()
+    coordinates("com.dolthub", "doltlite-android", doltliteVersion)
 
-            afterEvaluate {
-                from(components["release"])
-            }
-
-            pom {
-                name.set("DoltLite for Android")
-                description.set("SQLite with Dolt version control (branches, commits, merge, diff) for Android.")
-                url.set("https://github.com/dolthub/doltlite-android")
-                licenses {
-                    license {
-                        name.set("Apache-2.0")
-                        url.set("https://www.apache.org/licenses/LICENSE-2.0")
-                    }
-                }
-                developers {
-                    developer {
-                        id.set("dolthub")
-                        name.set("DoltHub, Inc.")
-                    }
-                }
-                scm {
-                    url.set("https://github.com/dolthub/doltlite-android")
-                    connection.set("scm:git:https://github.com/dolthub/doltlite-android.git")
-                }
+    pom {
+        name.set("DoltLite for Android")
+        description.set("SQLite with Dolt version control (branches, commits, merge, diff) for Android.")
+        url.set("https://github.com/dolthub/doltlite-android")
+        licenses {
+            license {
+                name.set("Apache-2.0")
+                url.set("https://www.apache.org/licenses/LICENSE-2.0")
             }
         }
-    }
-    repositories {
-        maven {
-            name = "sonatype"
-            url = uri("https://ossrh-staging-api.central.sonatype.com/service/local/staging/deploy/maven2/")
-            credentials {
-                username = System.getenv("SONATYPE_USERNAME")
-                password = System.getenv("SONATYPE_PASSWORD")
+        developers {
+            developer {
+                id.set("dolthub")
+                name.set("DoltHub, Inc.")
             }
         }
-    }
-}
-
-signing {
-    val key = System.getenv("SIGNING_KEY")
-    val password = System.getenv("SIGNING_PASSWORD")
-    if (!key.isNullOrEmpty()) {
-        useInMemoryPgpKeys(key, password)
-        sign(publishing.publications["release"])
+        scm {
+            url.set("https://github.com/dolthub/doltlite-android")
+            connection.set("scm:git:https://github.com/dolthub/doltlite-android.git")
+            developerConnection.set("scm:git:ssh://git@github.com/dolthub/doltlite-android.git")
+        }
     }
 }
