@@ -16,13 +16,11 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    # Build against the matching doltlite engine tag.
+    # Build against the matching doltlite engine ref. doltlite is public; a
+    # plain anonymous clone avoids the cross-repo auth failure actions/checkout
+    # hits with this repo's scoped GITHUB_TOKEN.
     - name: Checkout doltlite engine
-      uses: actions/checkout@v4
-      with:
-        repository: dolthub/doltlite
-        ref: ${{ github.ref_name }}
-        path: doltlite
+      run: git clone --depth=1 --branch "${{ github.ref_name }}" https://github.com/dolthub/doltlite doltlite
 
     - uses: actions/setup-java@v4
       with:
