@@ -64,6 +64,26 @@ jobs:
         fi
         echo "AAR contains binding classes and native libs"
 
+    # Acceptance test: drive the AAR's actual compiled binding classes over JNA
+    # against a host-built libdoltlite (the Android-ABI .so's can't load on the
+    # x86_64 runner, but the binding logic + C API are identical). Catches
+    # runtime breakage the assembly/content guards can't.
+    - name: Runtime acceptance test
+      run: |
+        sudo apt-get update -qq && sudo apt-get install -y -qq zlib1g-dev
+        mkdir -p native out
+        cc -O2 -fPIC -DNDEBUG -DSQLITE_ENABLE_MATH_FUNCTIONS -DSQLITE_THREADSAFE=1 \
+           -DDOLTLITE_PROLLY=1 -DDOLTLITE_VERSION='"smoke"' \
+           -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_RTREE -DSQLITE_ENABLE_DBSTAT_VTAB \
+           -DSQLITE_HAVE_ZLIB=1 -Wno-comment \
+           -shared doltlite/sqlite3.c -lz -o native/libdoltlite.so
+        aar="$(find build/outputs/aar -name '*-release.aar' | head -1)"
+        unzip -p "$aar" classes.jar > classes.jar
+        curl -fsSL -o jna.jar https://repo1.maven.org/maven2/net/java/dev/jna/jna/5.14.0/jna-5.14.0.jar
+        curl -fsSL -o kotlin-stdlib.jar https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/2.0.20/kotlin-stdlib-2.0.20.jar
+        javac -cp classes.jar:jna.jar -d out scripts/RuntimeSmoke.java
+        java -Djna.library.path="$PWD/native" -cp classes.jar:jna.jar:kotlin-stdlib.jar:out RuntimeSmoke
+
     - name: Create release with the AAR
       if: github.event_name != 'workflow_dispatch'
       env:
