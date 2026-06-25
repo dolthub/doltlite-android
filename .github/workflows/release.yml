@@ -16,11 +16,14 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    # Build against the matching doltlite engine ref. doltlite is public; a
-    # plain anonymous clone avoids the cross-repo auth failure actions/checkout
-    # hits with this repo's scoped GITHUB_TOKEN.
+    # Build against the matching doltlite engine ref: the release tag on a tag
+    # push, or master for a manual (workflow_dispatch) smoke build. doltlite is
+    # public, so a plain anonymous clone avoids the cross-repo auth failure
+    # actions/checkout hits with this repo's scoped GITHUB_TOKEN.
     - name: Checkout doltlite engine
-      run: git clone --depth=1 --branch "${{ github.ref_name }}" https://github.com/dolthub/doltlite doltlite
+      run: |
+        ref="${{ github.ref_type == 'tag' && github.ref_name || 'master' }}"
+        git clone --depth=1 --branch "$ref" https://github.com/dolthub/doltlite doltlite
 
     - uses: actions/setup-java@v4
       with:
@@ -59,6 +62,7 @@ jobs:
         fi
 
     - name: Publish to Maven Central
+      if: github.event_name != 'workflow_dispatch'
       env:
         # The vanniktech plugin reads credentials + the in-memory signing key
         # from these ORG_GRADLE_PROJECT_* env vars.
