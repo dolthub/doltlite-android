@@ -2,5 +2,7 @@
 build/
 local.properties
 src/main/jniLibs/
-doltlite/
+# Anchored: only the CI engine-checkout dir at the repo root, NOT the
+# com/dolthub/doltlite package path under src/main/kotlin.
+/doltlite/
 *.aar

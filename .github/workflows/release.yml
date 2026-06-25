@@ -46,6 +46,24 @@ jobs:
     - name: Assemble AAR
       run: gradle assembleRelease -PdoltliteVersion="${VERSION#v}" --no-daemon
 
+    # Guard: the AAR must actually contain the binding classes and a native lib.
+    # An empty classes.jar still assembles cleanly, so check contents explicitly.
+    - name: Verify AAR contents
+      run: |
+        aar="$(find build/outputs/aar -name '*-release.aar' | head -1)"
+        echo "inspecting $aar"
+        unzip -p "$aar" classes.jar > /tmp/classes.jar
+        if ! unzip -l /tmp/classes.jar | grep -q 'com/dolthub/doltlite/Doltlite.class'; then
+          echo "ERROR: classes.jar is missing com/dolthub/doltlite/Doltlite.class"
+          unzip -l /tmp/classes.jar
+          exit 1
+        fi
+        if ! unzip -l "$aar" | grep -q 'jni/arm64-v8a/libdoltlite.so'; then
+          echo "ERROR: AAR is missing jni/arm64-v8a/libdoltlite.so"
+          exit 1
+        fi
+        echo "AAR contains binding classes and native libs"
+
     - name: Create release with the AAR
       if: github.event_name != 'workflow_dispatch'
       env:
