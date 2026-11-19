@@ -32,6 +32,11 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools platforms;android-34 build-tools;34.0.0"
+          log-accepted-android-sdk-licenses: false
+
       - name: Download the matching DoltLite engine
         id: engine
         env:
@@ -58,7 +63,7 @@ jobs:
           VERSION: ${{ steps.engine.outputs.version }}
         run: |
           ndk=$(sed -n 's/^doltliteNdkVersion=//p' gradle.properties)
-          sdkmanager "platforms;android-34" "build-tools;34.0.0" "ndk;$ndk"
+          sdkmanager "ndk;$ndk"
           bash scripts/build-libs.sh "$PWD/doltlite" "$VERSION" "$ANDROID_HOME/ndk/$ndk"
 
       - name: Assemble and stage the AAR
@@ -125,6 +130,11 @@ jobs:
           java-version: "17"
 
       - uses: gradle/actions/setup-gradle@v4
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools platforms;android-34 build-tools;34.0.0"
+          log-accepted-android-sdk-licenses: false
 
       - uses: actions/download-artifact@v4
         with:
