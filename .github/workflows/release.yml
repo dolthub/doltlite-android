@@ -3,118 +3,177 @@ name: Release
 on:
   push:
     tags: ['v*']
+  pull_request:
   workflow_dispatch:
+    inputs:
+      engine_tag:
+        description: "Core release tag for the dry run (defaults to latest)"
+        type: string
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  publish:
-    runs-on: ubuntu-latest
-    env:
-      VERSION: ${{ github.ref_name }}
+  candidate:
+    name: Test Android release candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    outputs:
+      version: ${{ steps.engine.outputs.version }}
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
-    # Build against the matching doltlite engine ref: the release tag on a tag
-    # push, or master for a manual (workflow_dispatch) smoke build. doltlite is
-    # public, so a plain anonymous clone avoids the cross-repo auth failure
-    # actions/checkout hits with this repo's scoped GITHUB_TOKEN.
-    - name: Checkout doltlite engine
-      run: |
-        ref="${{ github.ref_type == 'tag' && github.ref_name || 'master' }}"
-        git clone --depth=1 --branch "$ref" https://github.com/dolthub/doltlite doltlite
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
 
-    - uses: actions/setup-java@v4
-      with:
-        distribution: temurin
-        java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
 
-    - uses: gradle/actions/setup-gradle@v4
+      - name: Download the matching DoltLite engine
+        id: engine
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ENGINE_TAG: ${{ inputs.engine_tag }}
+        run: |
+          tag=$ENGINE_TAG
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            tag=$GITHUB_REF_NAME
+          elif [[ -z "$tag" ]]; then
+            tag=$(gh release view --repo dolthub/doltlite --json tagName --jq .tagName)
+          fi
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]
+          version=${tag#v}
+          archive="doltlite-autoconf-$version.tar.gz"
+          gh release download "$tag" --repo dolthub/doltlite --pattern "$archive" --dir "$RUNNER_TEMP"
+          mkdir -p doltlite
+          tar -xzf "$RUNNER_TEMP/$archive" --strip-components=1 -C doltlite
+          test "$(cat doltlite/.dolt_release_version)" = "$tag"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
-    - name: Build doltlite amalgamation
-      working-directory: doltlite
-      run: |
-        ./configure
-        make sqlite3.c sqlite3.h sqlite3ext.h
+      - name: Build native libraries for all four Android ABIs
+        env:
+          VERSION: ${{ steps.engine.outputs.version }}
+        run: |
+          ndk=$(sed -n 's/^doltliteNdkVersion=//p' gradle.properties)
+          sdkmanager "platforms;android-34" "build-tools;34.0.0" "ndk;$ndk"
+          bash scripts/build-libs.sh "$PWD/doltlite" "$VERSION" "$ANDROID_HOME/ndk/$ndk"
 
-    - name: Cross-compile libdoltlite for Android ABIs
-      run: |
-        bash scripts/build-libs.sh "$PWD/doltlite" "${VERSION#v}" \
-          "${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
+      - name: Assemble and stage the AAR
+        env:
+          VERSION: ${{ steps.engine.outputs.version }}
+        run: |
+          ./gradlew assembleRelease -PdoltliteVersion="$VERSION" --no-daemon
+          ./gradlew publishAllPublicationsToCandidateRepository -x :bundleReleaseAar \
+            -PdoltliteVersion="$VERSION" -PdoltliteCandidate --no-daemon
+          aar="doltlite-android-$VERSION.aar"
+          cp "build/candidate-repository/com/dolthub/doltlite-android/$VERSION/$aar" "build/$aar"
+          cmp "build/outputs/aar/doltlite-android-release.aar" "build/$aar"
+          python3 scripts/verify-aar.py "build/$aar"
 
-    - name: Assemble AAR
-      run: gradle assembleRelease -PdoltliteVersion="${VERSION#v}" --no-daemon
+      - name: Build the consumer from the staged Maven package
+        env:
+          VERSION: ${{ steps.engine.outputs.version }}
+        run: |
+          ./gradlew -p consumer assembleDebug assembleDebugAndroidTest --no-daemon \
+            -PdoltliteVersion="$VERSION" \
+            -PdoltliteCandidateRepository="$PWD/build/candidate-repository"
 
-    # Guard: the AAR must actually contain the binding classes and a native lib.
-    # An empty classes.jar still assembles cleanly, so check contents explicitly.
-    - name: Verify AAR contents
-      run: |
-        aar="$(find build/outputs/aar -name '*-release.aar' | head -1)"
-        echo "inspecting $aar"
-        unzip -p "$aar" classes.jar > /tmp/classes.jar
-        if ! unzip -l /tmp/classes.jar | grep -q 'com/dolthub/doltlite/Doltlite.class'; then
-          echo "ERROR: classes.jar is missing com/dolthub/doltlite/Doltlite.class"
-          unzip -l /tmp/classes.jar
-          exit 1
-        fi
-        if ! unzip -l "$aar" | grep -q 'jni/arm64-v8a/libdoltlite.so'; then
-          echo "ERROR: AAR is missing jni/arm64-v8a/libdoltlite.so"
-          exit 1
-        fi
-        echo "AAR contains binding classes and native libs"
+      - name: Enable emulator hardware acceleration
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
+            sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
 
-    # Acceptance test: drive the AAR's actual compiled binding classes over JNA
-    # against a host-built libdoltlite (the Android-ABI .so's can't load on the
-    # x86_64 runner, but the binding logic + C API are identical). Catches
-    # runtime breakage the assembly/content guards can't.
-    - name: Runtime acceptance test
-      run: |
-        sudo apt-get update -qq && sudo apt-get install -y -qq zlib1g-dev
-        mkdir -p native out
-        cc -O2 -fPIC -DNDEBUG -DSQLITE_ENABLE_MATH_FUNCTIONS -DSQLITE_THREADSAFE=1 \
-           -DDOLTLITE_PROLLY=1 -DDOLTLITE_VERSION='"smoke"' \
-           -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_RTREE -DSQLITE_ENABLE_DBSTAT_VTAB \
-           -DSQLITE_HAVE_ZLIB=1 -Wno-comment \
-           -shared doltlite/sqlite3.c -lz -o native/libdoltlite.so
-        aar="$(find build/outputs/aar -name '*-release.aar' | head -1)"
-        unzip -p "$aar" classes.jar > classes.jar
-        curl -fsSL -o jna.jar https://repo1.maven.org/maven2/net/java/dev/jna/jna/5.14.0/jna-5.14.0.jar
-        curl -fsSL -o kotlin-stdlib.jar https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/2.0.20/kotlin-stdlib-2.0.20.jar
-        javac -cp classes.jar:jna.jar -d out scripts/RuntimeSmoke.java
-        java -Djna.library.path="$PWD/native" -cp classes.jar:jna.jar:kotlin-stdlib.jar:out RuntimeSmoke
+      - name: Run the packaged native library on Android
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          VERSION: ${{ steps.engine.outputs.version }}
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          script: bash scripts/run-android-smoke.sh "v$VERSION"
 
-    - name: Create release with the AAR
-      if: github.event_name != 'workflow_dispatch'
-      env:
-        GH_TOKEN: ${{ github.token }}
-      run: |
-        version="${VERSION#v}"
-        aar="$(find build/outputs/aar -name '*-release.aar' | head -1)"
-        cp "$aar" "doltlite-android-${version}.aar"
-        if gh release view "${VERSION}" >/dev/null 2>&1; then
-          gh release upload "${VERSION}" "doltlite-android-${version}.aar" --clobber
-        else
-          gh release create "${VERSION}" "doltlite-android-${version}.aar" \
-            --title "doltlite-android ${version}" --generate-notes
-        fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-candidate
+          path: build/doltlite-android-${{ steps.engine.outputs.version }}.aar
+          if-no-files-found: error
 
-    - name: Publish to Maven Central
-      if: github.event_name != 'workflow_dispatch'
-      env:
-        # The vanniktech plugin reads credentials + the in-memory signing key
-        # from these ORG_GRADLE_PROJECT_* env vars.
-        ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.SONATYPE_USERNAME }}
-        ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.SONATYPE_PASSWORD }}
-        ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
-        ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_PASSWORD }}
-      run: |
-        # The secrets context can't be used in an `if:`, so gate here. Without
-        # the Central Portal / signing secrets the AAR is still on the GitHub
-        # release. publishAndReleaseToMavenCentral uploads and auto-releases.
-        if [ -z "$ORG_GRADLE_PROJECT_mavenCentralUsername" ] || [ -z "$ORG_GRADLE_PROJECT_signingInMemoryKey" ]; then
-          echo "Maven Central secrets not set; skipping publish (AAR is on the release)."
-          exit 0
-        fi
-        gradle publishAndReleaseToMavenCentral \
-          -PdoltliteVersion="${VERSION#v}" --no-daemon --no-configuration-cache
+  publish:
+    name: Publish verified Android release
+    if: github.event_name == 'push'
+    needs: candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.candidate.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: android-candidate
+          path: candidate
+
+      - name: Create GitHub release with the tested AAR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          aar="candidate/doltlite-android-$VERSION.aar"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$aar" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "$aar" \
+              --title "doltlite-android $VERSION" --generate-notes
+          fi
+
+      - name: Publish the tested AAR to Maven Central
+        env:
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.SONATYPE_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.SONATYPE_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_PASSWORD }}
+        run: |
+          aar="doltlite-android-$VERSION.aar"
+          url="https://repo.maven.apache.org/maven2/com/dolthub/doltlite-android/$VERSION/$aar"
+          if curl -fsSL --max-time 20 "$url" -o "$RUNNER_TEMP/published.aar"; then
+            cmp "candidate/$aar" "$RUNNER_TEMP/published.aar"
+          else
+            : "${ORG_GRADLE_PROJECT_mavenCentralUsername:?Maven Central username is required}"
+            : "${ORG_GRADLE_PROJECT_mavenCentralPassword:?Maven Central password is required}"
+            : "${ORG_GRADLE_PROJECT_signingInMemoryKey:?Maven Central signing key is required}"
+            mkdir -p build/outputs/aar
+            cp "candidate/$aar" build/outputs/aar/doltlite-android-release.aar
+            ./gradlew publishAndReleaseToMavenCentral -x :bundleReleaseAar \
+              -PdoltliteVersion="$VERSION" --no-daemon --no-configuration-cache
+          fi
+
+      - name: Resolve the exact published Maven package
+        run: |
+          aar="doltlite-android-$VERSION.aar"
+          url="https://repo.maven.apache.org/maven2/com/dolthub/doltlite-android/$VERSION/$aar"
+          for _ in {1..40}; do
+            if curl -fsSL --max-time 15 "$url" -o "$RUNNER_TEMP/published.aar"; then
+              break
+            fi
+            sleep 15
+          done
+          cmp "candidate/$aar" "$RUNNER_TEMP/published.aar"
+          ./gradlew -p consumer assembleDebug assembleDebugAndroidTest --no-daemon \
+            --refresh-dependencies -PdoltliteVersion="$VERSION"

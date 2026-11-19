@@ -8,11 +8,13 @@ plugins {
 }
 
 // Version comes from the release workflow: -PdoltliteVersion=x.y.z (from the tag).
-val doltliteVersion = (findProperty("doltliteVersion") as String?) ?: "0.0.0"
+val doltliteVersion = providers.gradleProperty("doltliteVersion").getOrElse("0.0.0")
+val candidate = providers.gradleProperty("doltliteCandidate").isPresent
 
 android {
     namespace = "com.dolthub.doltlite"
     compileSdk = 34
+    ndkVersion = providers.gradleProperty("doltliteNdkVersion").get()
 
     defaultConfig {
         minSdk = 21
@@ -35,11 +37,21 @@ dependencies {
     api("net.java.dev.jna:jna:5.14.0@aar")
 }
 
+if (candidate) {
+    publishing {
+        repositories {
+            maven {
+                name = "candidate"
+                url = uri(layout.buildDirectory.dir("candidate-repository"))
+            }
+        }
+    }
+}
+
 mavenPublishing {
-    // Publish the release variant + sources to the Central Portal, signed.
     configure(AndroidSingleVariantLibrary("release", sourcesJar = true, publishJavadocJar = false))
     publishToMavenCentral(SonatypeHost.CENTRAL_PORTAL)
-    signAllPublications()
+    if (!candidate) signAllPublications()
     coordinates("com.dolthub", "doltlite-android", doltliteVersion)
 
     pom {
