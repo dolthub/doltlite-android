@@ -66,8 +66,7 @@ for entry in "${ABIS[@]}"; do
     exit 1
   fi
   mkdir -p "$OUT/$abi"
-  # zlib (libz) ships in the NDK sysroot.
-  "$cc" "${CFLAGS_COMMON[@]}" -shared "$SRC/sqlite3.c" -lz -o "$OUT/$abi/libdoltlite.so"
+  "$cc" "${CFLAGS_COMMON[@]}" -shared -Wl,--no-undefined "$SRC/sqlite3.c" -lz -lm -o "$OUT/$abi/libdoltlite.so"
   echo "built $abi -> $OUT/$abi/libdoltlite.so"
 done
 
