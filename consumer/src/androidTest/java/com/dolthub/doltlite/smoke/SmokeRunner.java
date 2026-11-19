@@ -60,6 +60,7 @@ public final class SmokeRunner extends Instrumentation {
     private void checkMemoryDatabase() {
         try (Doltlite db = new Doltlite(":memory:")) {
             verifyEngine(db);
+            expect("math function", 5.0, scalar(db, "SELECT sqrt(25)"));
             db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT)");
             db.execute("INSERT INTO t(v) VALUES (?)", "a");
             commit(db, "memory commit");
